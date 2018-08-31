@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <utility>
+#include <algorithm>
+#include <limits>
 
 #include "mace/core/macros.h"
 #include "mace/core/net.h"
@@ -22,7 +24,7 @@
 
 namespace mace {
 
-NetBase::NetBase(const std::shared_ptr<const OperatorRegistry> op_registry,
+NetBase::NetBase(const std::shared_ptr<const OperatorRegistryBase> op_registry,
                  const std::shared_ptr<const NetDef> net_def,
                  Workspace *ws,
                  DeviceType type)
@@ -31,16 +33,17 @@ NetBase::NetBase(const std::shared_ptr<const OperatorRegistry> op_registry,
   MACE_UNUSED(type);
 }
 
-SerialNet::SerialNet(const std::shared_ptr<const OperatorRegistry> op_registry,
-                     const std::shared_ptr<const NetDef> net_def,
-                     Workspace *ws,
-                     DeviceType type,
-                     const NetMode mode)
+SerialNet::SerialNet(
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
+    const std::shared_ptr<const NetDef> net_def,
+    Workspace *ws,
+    DeviceType type,
+    const NetMode mode)
     : NetBase(op_registry, net_def, ws, type), device_type_(type) {
   MACE_LATENCY_LOGGER(1, "Constructing SerialNet ", net_def->name());
   for (int idx = 0; idx < net_def->op_size(); ++idx) {
     const auto &operator_def = net_def->op(idx);
-    // TODO(liuqi): refactor based on PB
+    // TODO(liuqi): refactor to add device_type to OperatorDef
     const int op_device =
         ProtoArgHelper::GetOptionalArg<OperatorDef, int>(
             operator_def, "device", static_cast<int>(device_type_));
@@ -111,9 +114,8 @@ MaceStatus SerialNet::Run(RunMetadata *run_metadata) {
       }
 
       std::vector<std::vector<int64_t>> output_shapes;
-      for (auto output_shape : op->debug_def().output_shape()) {
-        output_shapes.push_back({output_shape.dims().begin(),
-                                 output_shape.dims().end()});
+      for (auto output : op->Outputs()) {
+        output_shapes.push_back(output->shape());
       }
       OperatorStats op_stats = {op->debug_def().name(), op->debug_def().type(),
                                 output_shapes,
@@ -124,13 +126,31 @@ MaceStatus SerialNet::Run(RunMetadata *run_metadata) {
 
     VLOG(3) << "Operator " << op->debug_def().name()
             << " has shape: " << MakeString(op->Output(0)->shape());
+
+    if (EnvEnabled("MACE_LOG_TENSOR_RANGE") && device_type_ == CPU) {
+      for (int i = 0; i < op->OutputSize(); ++i) {
+        int data_type = op->GetOptionalArg("T", static_cast<int>(DT_FLOAT));
+        if (data_type == static_cast<int>(DT_FLOAT)) {
+          float max_v = std::numeric_limits<float>::lowest();
+          float min_v = std::numeric_limits<float>::max();
+          Tensor::MappingGuard guard(op->Output(i));
+          const float *output_data = op->Output(i)->data<float>();
+          for (index_t j = 0; j < op->Output(i)->size(); ++j) {
+            max_v = std::max(max_v, output_data[j]);
+            min_v = std::min(min_v, output_data[j]);
+          }
+          LOG(INFO) << "Tensor range @@" << op->debug_def().output(i)
+                    << "@@" << min_v << "," << max_v;
+        }
+      }
+    }
   }
 
   return MACE_SUCCESS;
 }
 
 std::unique_ptr<NetBase> CreateNet(
-    const std::shared_ptr<const OperatorRegistry> op_registry,
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
     const NetDef &net_def,
     Workspace *ws,
     DeviceType type,
@@ -140,7 +160,7 @@ std::unique_ptr<NetBase> CreateNet(
 }
 
 std::unique_ptr<NetBase> CreateNet(
-    const std::shared_ptr<const OperatorRegistry> op_registry,
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
     const std::shared_ptr<const NetDef> net_def,
     Workspace *ws,
     DeviceType type,

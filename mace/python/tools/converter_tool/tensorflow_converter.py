@@ -54,7 +54,9 @@ TFSupportedOps = [
     'Mul',
     'Div',
     'Min',
+    'Minimum',
     'Max',
+    'Maximum',
     'Neg',
     'Abs',
     'Pow',
@@ -67,6 +69,7 @@ TFSupportedOps = [
     'Relu6',
     'Tanh',
     'Sigmoid',
+    'Fill',
     'FusedBatchNorm',
     'AvgPool',
     'MaxPool',
@@ -78,6 +81,7 @@ TFSupportedOps = [
     'Shape',
     'Transpose',
     'Softmax',
+    'ResizeBicubic',
     'ResizeBilinear',
     'Placeholder',
     'SpaceToBatchND',
@@ -95,6 +99,7 @@ TFSupportedOps = [
     'Pack',
     'Cast',
     'ArgMax',
+    'Split',
 ]
 
 TFOpType = Enum('TFOpType', [(op, op) for op in TFSupportedOps], type=str)
@@ -120,7 +125,9 @@ class TensorflowConverter(base_converter.ConverterInterface):
         TFOpType.Mul.name: EltwiseType.PROD,
         TFOpType.Div.name: EltwiseType.DIV,
         TFOpType.Min.name: EltwiseType.MIN,
+        TFOpType.Minimum.name: EltwiseType.MIN,
         TFOpType.Max.name: EltwiseType.MAX,
+        TFOpType.Maximum.name: EltwiseType.MAX,
         TFOpType.Neg.name: EltwiseType.NEG,
         TFOpType.Abs.name: EltwiseType.ABS,
         TFOpType.Pow.name: EltwiseType.POW,
@@ -148,7 +155,9 @@ class TensorflowConverter(base_converter.ConverterInterface):
             TFOpType.Mul.name: self.convert_elementwise,
             TFOpType.Div.name: self.convert_elementwise,
             TFOpType.Min.name: self.convert_elementwise,
+            TFOpType.Minimum.name: self.convert_elementwise,
             TFOpType.Max.name: self.convert_elementwise,
+            TFOpType.Maximum.name: self.convert_elementwise,
             TFOpType.Neg.name: self.convert_elementwise,
             TFOpType.Abs.name: self.convert_elementwise,
             TFOpType.Pow.name: self.convert_elementwise,
@@ -161,6 +170,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
             TFOpType.Relu6.name: self.convert_activation,
             TFOpType.Tanh.name: self.convert_activation,
             TFOpType.Sigmoid.name: self.convert_activation,
+            TFOpType.Fill.name: self.convert_fill,
             TFOpType.FusedBatchNorm.name: self.convert_fused_batchnorm,
             TFOpType.AvgPool.name: self.convert_pooling,
             TFOpType.MaxPool.name: self.convert_pooling,
@@ -172,6 +182,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
             TFOpType.Squeeze.name: self.convert_squeeze,
             TFOpType.Transpose.name: self.convert_transpose,
             TFOpType.Softmax.name: self.convert_softmax,
+            TFOpType.ResizeBicubic.name: self.convert_resize_bicubic,
             TFOpType.ResizeBilinear.name: self.convert_resize_bilinear,
             TFOpType.Placeholder.name: self.convert_nop,
             TFOpType.SpaceToBatchND.name: self.convert_space_batch,
@@ -189,6 +200,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
             TFOpType.Stack.name: self.convert_stack,
             TFOpType.Cast.name: self.convert_cast,
             TFOpType.ArgMax.name: self.convert_argmax,
+            TFOpType.Split.name: self.convert_split,
         }
         self._option = option
         self._mace_net_def = mace_pb2.NetDef()
@@ -198,6 +210,8 @@ class TensorflowConverter(base_converter.ConverterInterface):
         tf_graph_def = tf.GraphDef()
         with tf.gfile.Open(src_model_file, 'rb') as f:
             tf_graph_def.ParseFromString(f.read())
+
+        self._placeholders = {}
         self.add_shape_info(tf_graph_def)
 
         with tf.Session() as session:
@@ -238,6 +252,8 @@ class TensorflowConverter(base_converter.ConverterInterface):
                         tensor_shape_pb2.TensorShapeProto.Dim(size=i) for i in
                         input_node.shape
                     ])
+                    self._placeholders[node.name + ':0'] = \
+                        np.zeros(shape=input_node.shape, dtype=float)
 
     @staticmethod
     def get_scope(tensor_name):
@@ -286,13 +302,18 @@ class TensorflowConverter(base_converter.ConverterInterface):
 
     # this function tries to infer tensor shape, but some dimension shape
     # may be undefined due to variance of input length
-    @staticmethod
-    def infer_tensor_shape(tensor):
-        shape = tensor.shape.as_list()
+    def infer_tensor_shape(self, tensor):
+        inferred_tensor_shape = tensor.shape.as_list()
+        inferred_success = True
+        for _, dim in enumerate(inferred_tensor_shape):
+            if dim is None:
+                inferred_success = False
+                break
+        if inferred_success:
+            return inferred_tensor_shape
 
-        def normalize_func(dim):
-            return dim if dim else - 1
-        return [normalize_func(dim) for dim in shape]
+        tensor_shape = tf.shape(tensor).eval(feed_dict=self._placeholders)
+        return tensor_shape
 
     def convert_nop(self, tf_op):
         pass
@@ -318,7 +339,16 @@ class TensorflowConverter(base_converter.ConverterInterface):
             else:
                 mace_check(False, "data type %s not supported" % dtype)
         except ValueError:
-            data_type_arg.i = self._option.data_type
+            try:
+                dtype = tf_op.get_attr('SrcT')
+                if dtype == tf.int32 or dtype == tf.bool:
+                    data_type_arg.i = mace_pb2.DT_INT32
+                elif dtype == tf.float32:
+                    data_type_arg.i = self._option.data_type
+                else:
+                    mace_check(False, "data type %s not supported" % dtype)
+            except ValueError:
+                data_type_arg.i = self._option.data_type
 
         ConverterUtil.add_data_format_arg(op, DataFormat.NHWC)
 
@@ -352,15 +382,21 @@ class TensorflowConverter(base_converter.ConverterInterface):
                 dilation_val = [1, 1]
             dilation_arg.ints.extend(dilation_val)
         else:
-            del op.input[1:]
+            mace_check(len(tf_op.inputs) >= 3,
+                       "deconv should have (>=) 3 inputs.")
             output_shape_arg = op.arg.add()
             output_shape_arg.name = MaceKeyword.mace_output_shape_str
-            output_shape_value = tf_op.inputs[0].eval().astype(np.int32).flat
-            output_shape_arg.ints.extend(output_shape_value)
-            self._skip_tensor.add(tf_op.inputs[0].name)
-            del op.input[0]
-            if len(tf_op.inputs) >= 3:
-                op.input.extend([tf_op.inputs[2].name, tf_op.inputs[1].name])
+            if tf_op.inputs[0].op.type == TFOpType.Const.name:
+                output_shape_value = \
+                    tf_op.inputs[0].eval().astype(np.int32).flat
+                output_shape_arg.ints.extend(output_shape_value)
+            else:
+                output_shape_value = {}
+                output_shape_arg.ints.extend(output_shape_value)
+            del op.input[:]
+            op.input.extend([tf_op.inputs[2].name,
+                             tf_op.inputs[1].name,
+                             tf_op.inputs[0].name])
 
     def convert_elementwise(self, tf_op):
         op = self.convert_general_op(tf_op)
@@ -370,13 +406,24 @@ class TensorflowConverter(base_converter.ConverterInterface):
         type_arg.name = MaceKeyword.mace_element_type_str
         type_arg.i = self.eltwise_type[tf_op.type].value
 
+        def check_is_scalar(tf_op):
+            if len(tf_op.inputs) == 1:
+                return len(tf_op.inputs[0].shape) == 0
+            elif len(tf_op.inputs) == 2:
+                return len(tf_op.inputs[0].shape) == 0 and\
+                       len(tf_op.inputs[1].shape) == 0
+
+        if check_is_scalar(tf_op):
+            op.type = MaceOp.ScalarMath.name
+        else:
+            op.type = MaceOp.Eltwise.name
         if tf_op.type == TFOpType.Square:
             value_arg = op.arg.add()
-            value_arg.name = MaceKeyword.mace_value_str
+            value_arg.name = MaceKeyword.mace_scalar_input_str
             value_arg.f = 2.0
         elif tf_op.type == TFOpType.Rsqrt:
             value_arg = op.arg.add()
-            value_arg.name = MaceKeyword.mace_value_str
+            value_arg.name = MaceKeyword.mace_scalar_input_str
             value_arg.f = -0.5
 
         if type_arg.i != EltwiseType.NEG.value \
@@ -387,19 +434,31 @@ class TensorflowConverter(base_converter.ConverterInterface):
                         EltwiseType.SUM, EltwiseType.PROD,
                         EltwiseType.MAX, EltwiseType.MIN]
 
-                if len(tf_op.inputs) > 1 and len(tf_op.inputs[1].shape) == 0:
+                if len(tf_op.inputs) > 1 and\
+                        len(tf_op.inputs[1].shape) == 0 and\
+                        tf_op.inputs[1].op.type == TFOpType.Const.name:
                     scalar = tf_op.inputs[1].eval().astype(np.float32)
                     value_arg = op.arg.add()
-                    value_arg.name = MaceKeyword.mace_value_str
+                    value_arg.name = MaceKeyword.mace_scalar_input_str
                     value_arg.f = scalar
                     self._skip_tensor.add(tf_op.inputs[1].name)
+                    value_index_arg = op.arg.add()
+                    value_index_arg.name =\
+                        MaceKeyword.mace_scalar_input_index_str
+                    value_index_arg.i = 1
+                    self._skip_tensor.add(tf_op.inputs[1].name)
                     del op.input[1]
-                elif len(tf_op.inputs[0].shape) == 0 and \
+                elif len(tf_op.inputs[0].shape) == 0 and\
+                        tf_op.inputs[0].op.type == TFOpType.Const.name and\
                         is_commutative(type_arg.i):
                     scalar = tf_op.inputs[0].eval().astype(np.float32)
                     value_arg = op.arg.add()
-                    value_arg.name = MaceKeyword.mace_value_str
+                    value_arg.name = MaceKeyword.mace_scalar_input_str
                     value_arg.f = scalar
+                    value_index_arg = op.arg.add()
+                    value_index_arg.name =\
+                        MaceKeyword.mace_scalar_input_index_str
+                    value_index_arg.i = 0
                     self._skip_tensor.add(tf_op.inputs[0].name)
                     del op.input[0]
             except tf.errors.InvalidArgumentError:
@@ -428,6 +487,10 @@ class TensorflowConverter(base_converter.ConverterInterface):
             limit_arg = op.arg.add()
             limit_arg.name = MaceKeyword.mace_activation_max_limit_str
             limit_arg.f = 6.0
+
+    def convert_fill(self, tf_op):
+        op = self.convert_general_op(tf_op)
+        op.type = MaceOp.Fill.name
 
     def convert_fused_batchnorm(self, tf_op):
         op = self.convert_general_op(tf_op)
@@ -475,6 +538,20 @@ class TensorflowConverter(base_converter.ConverterInterface):
     def convert_softmax(self, tf_op):
         op = self.convert_general_op(tf_op)
         op.type = MaceOp.Softmax.name
+
+    def convert_resize_bicubic(self, tf_op):
+        op = self.convert_general_op(tf_op)
+        op.type = MaceOp.ResizeBicubic.name
+        del op.input[1:]
+
+        size_arg = op.arg.add()
+        size_arg.name = MaceKeyword.mace_resize_size_str
+        size_value = tf_op.inputs[1].eval().astype(np.int32)
+        size_arg.ints.extend(size_value)
+        self._skip_tensor.add(tf_op.inputs[1].name)
+        align_corners_arg = op.arg.add()
+        align_corners_arg.name = MaceKeyword.mace_align_corners_str
+        align_corners_arg.i = tf_op.get_attr(tf_align_corners)
 
     def convert_resize_bilinear(self, tf_op):
         op = self.convert_general_op(tf_op)
@@ -551,7 +628,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
         axis_arg = op.arg.add()
         axis_arg.name = MaceKeyword.mace_axis_str
         axis = tf_op.inputs[-1].eval().astype(np.int32)
-        axis = 4 + axis if axis < 0 else axis
+        axis = len(op.output_shape[0].dims) + axis if axis < 0 else axis
         axis_arg.i = axis
 
         self._skip_tensor.add(tf_op.inputs[-1].name)
@@ -732,3 +809,20 @@ class TensorflowConverter(base_converter.ConverterInterface):
         op = self.convert_general_op(tf_op)
         op.type = MaceOp.ArgMax.name
         op.output_type.extend([mace_pb2.DT_INT32])
+
+    def convert_split(self, tf_op):
+        axis = tf_op.inputs[0].eval().astype(np.int32)
+        axis = len(op.output_shape[0].dims) + axis if axis < 0 else axis
+        op = self.convert_general_op(tf_op)
+        op.type = MaceOp.Split.name
+        del op.input[0]
+
+        axis_arg = op.arg.add()
+        axis_arg.name = MaceKeyword.mace_axis_str
+        axis_arg.i = axis
+
+        num_split_arg = op.arg.add()
+        num_split_arg.name = MaceKeyword.mace_num_split_str
+        num_split_arg.i = tf_op.get_attr('num_split')
+
+        self._skip_tensor.add(tf_op.inputs[0].name)

@@ -74,7 +74,7 @@ enum MaceStatus {
   }
 
 // MACE input/output tensor
-class MaceTensor {
+class __attribute__((visibility("default"))) MaceTensor {
  public:
   // shape - the shape of the tensor, with size n
   // data - the buffer of the tensor, must not be null with size equals
@@ -97,7 +97,7 @@ class MaceTensor {
   std::unique_ptr<Impl> impl_;
 };
 
-class MaceEngine {
+class __attribute__((visibility("default"))) MaceEngine {
  public:
   explicit MaceEngine(DeviceType device_type);
   ~MaceEngine();
@@ -106,6 +106,11 @@ class MaceEngine {
                   const std::vector<std::string> &input_nodes,
                   const std::vector<std::string> &output_nodes,
                   const unsigned char *model_data);
+
+  MaceStatus Init(const NetDef *net_def,
+                  const std::vector<std::string> &input_nodes,
+                  const std::vector<std::string> &output_nodes,
+                  const std::string &model_data_file);
 
   MaceStatus Run(const std::map<std::string, MaceTensor> &inputs,
                  std::map<std::string, MaceTensor> *outputs);
@@ -122,6 +127,20 @@ class MaceEngine {
   MaceEngine &operator=(const MaceEngine &) = delete;
 };
 
+/// \brief Create MaceEngine from files (model file + data file)
+///
+/// Create MaceEngine object
+///
+/// \param model_pb[in]: the content of model graph file
+/// \param model_data_file[in]: the path of model data file
+/// \param input_nodes[in]: the array of input nodes' name
+/// \param output_nodes[in]: the array of output nodes' name
+/// \param device_type[in]: one of [CPU, GPU, HEXAGON],
+///        based on the runtime type of your model deployment file.
+/// \param engine[out]: output MaceEngine object
+/// \return MACE_SUCCESS for success, MACE_INVALID_ARGS for wrong arguments,
+///         MACE_OUT_OF_RESOURCES for resources is out of range.
+__attribute__((visibility("default")))
 MaceStatus CreateMaceEngineFromProto(
     const std::vector<unsigned char> &model_pb,
     const std::string &model_data_file,

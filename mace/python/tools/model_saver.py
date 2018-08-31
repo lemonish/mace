@@ -33,6 +33,11 @@ GPUDataType = \
     Enum('GPUDataType', [(ele, ele) for ele in GPUDataTypeStrs], type=str)
 
 
+class ModelFormat(object):
+    file = "file"
+    code = "code"
+
+
 def generate_obfuscated_name(namespace, name):
     md5 = hashlib.md5()
     md5.update(namespace)
@@ -91,30 +96,6 @@ def obfuscate_name(net_def):
         for i in range(len(op.output)):
             if output_node not in op.output[i]:
                 op.output[i] = in_out_map[op.output[i]]
-
-
-def normalize_op_name(op_name):
-    idx = op_name.rfind(':')
-    if idx == -1:
-        return op_name
-    else:
-        return op_name[:idx]
-
-
-def rename_tensor(net_def):
-    tensor_map = {}
-    for t in net_def.tensors:
-        if t.name not in tensor_map:
-            tensor_map[t.name] = "_" + normalize_op_name(t.name).replace("/",
-                                                                         "_")
-            t.name = tensor_map[t.name]
-    for op in net_def.op:
-        for i in range(len(op.input)):
-            if op.input[i] in tensor_map:
-                op.input[i] = tensor_map[op.input[i]]
-        for i in range(len(op.output)):
-            if op.output[i] in tensor_map:
-                op.output[i] = tensor_map[op.output[i]]
 
 
 def stringfy(value):
@@ -240,15 +221,15 @@ def save_model_to_code(net_def, model_tag, runtime,
         counter += 1
 
     # generate tensor data
-    model_data = extract_model_data(net_def)
-    template_name = 'tensor_data.jinja2'
-    source = j2_env.get_template(template_name).render(
-        tag=model_tag,
-        embed_model_data=embed_model_data,
-        model_data_size=len(model_data),
-        model_data=model_data)
-    with open(output_dir + 'tensor_data' + '.cc', "wb") as f:
-        f.write(source)
+    if embed_model_data:
+        model_data = extract_model_data(net_def)
+        template_name = 'tensor_data.jinja2'
+        source = j2_env.get_template(template_name).render(
+            tag=model_tag,
+            model_data_size=len(model_data),
+            model_data=model_data)
+        with open(output_dir + 'tensor_data' + '.cc', "wb") as f:
+            f.write(source)
 
     # generate op source files
     template_name = 'operator.jinja2'
@@ -293,20 +274,18 @@ def save_model_to_code(net_def, model_tag, runtime,
 
 def save_model(net_def, model_checksum, weight_checksum, template_dir,
                obfuscate, model_tag, output_dir, runtime, embed_model_data,
-               winograd_conv, data_type, model_build_type):
+               winograd_conv, data_type, model_graph_format):
     if obfuscate:
         obfuscate_name(net_def)
-    else:
-        rename_tensor(net_def)
 
     output_dir = output_dir + '/'
     # update tensor type
     update_tensor_infos(net_def, runtime, data_type)
 
-    if model_build_type == 'proto' or not embed_model_data:
+    if model_graph_format == ModelFormat.file or not embed_model_data:
         save_model_data(net_def, model_tag, output_dir)
 
-    if model_build_type == 'proto':
+    if model_graph_format == ModelFormat.file:
         save_model_to_proto(net_def, model_tag, output_dir)
     else:
         save_model_to_code(net_def, model_tag, runtime,

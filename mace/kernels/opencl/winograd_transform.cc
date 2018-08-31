@@ -29,6 +29,8 @@ MaceStatus WinogradTransformFunctor<DeviceType::GPU, T>::operator()(
   if (kernel_.get() == nullptr) {
     std::string obfuscated_kernel_name;
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(kernel_error_);
+    NON_UNIFORM_WG_CONFIG;
     if (wino_blk_size_ == 4) {
       obfuscated_kernel_name =
           MACE_OBFUSCATE_SYMBOL("winograd_transform_4x4");
@@ -44,23 +46,13 @@ MaceStatus WinogradTransformFunctor<DeviceType::GPU, T>::operator()(
       return MACE_SUCCESS;
     }
     built_options.emplace("-DDATA_TYPE=" +
-                          DtToUpstreamCLDt(DataTypeToEnum<T>::value));
+                          DtToUpCompatibleCLDt(DataTypeToEnum<T>::value));
     built_options.emplace("-DCMD_DATA_TYPE=" +
-                          DtToUpstreamCLCMDDt(DataTypeToEnum<T>::value));
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      kernel_error_ = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR(kernel_error_->Allocate(1));
-      kernel_error_->Map(nullptr);
-      *(kernel_error_->mutable_data<char>()) = 0;
-      kernel_error_->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
-    kernel_ = runtime->BuildKernel("winograd_transform", obfuscated_kernel_name,
-                                   built_options);
+                          DtToUpCompatibleCLCMDDt(DataTypeToEnum<T>::value));
+    MACE_RETURN_IF_ERROR(runtime->BuildKernel("winograd_transform",
+                                              obfuscated_kernel_name,
+                                              built_options,
+                                              &kernel_));
 
     kwg_size_ =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(kernel_));
@@ -105,14 +97,8 @@ MaceStatus WinogradTransformFunctor<DeviceType::GPU, T>::operator()(
     MACE_RETURN_IF_ERROR(output_tensor->ResizeImage(output_shape, image_shape));
 
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel_.setArg(idx++,
-                     *(static_cast<cl::Buffer *>(kernel_error_->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel_.setArg(idx++, gws[0]);
-      kernel_.setArg(idx++, gws[1]);
-    }
+    OUT_OF_RANGE_SET_ARG;
+    SET_2D_GWS_ARGS(kernel_);
     kernel_.setArg(idx++, *(input_tensor->opencl_image()));
     kernel_.setArg(idx++, *(output_tensor->opencl_image()));
     kernel_.setArg(idx++, static_cast<uint32_t>(input_tensor->dim(1)));
@@ -134,29 +120,28 @@ MaceStatus WinogradTransformFunctor<DeviceType::GPU, T>::operator()(
                                   output_tensor->dim(0),
                                   output_tensor->dim(1),
                                   output_tensor->dim(2));
-  TuningOrRun2DKernel(kernel_, tuning_key, gws, lws, future);
+  MACE_RETURN_IF_ERROR(TuningOrRun2DKernel(kernel_, tuning_key,
+                                           gws, lws, future));
 
-  if (runtime->IsOutOfRangeCheckEnabled()) {
-    kernel_error_->Map(nullptr);
-    char *kerror_code = kernel_error_->mutable_data<char>();
-    MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-    kernel_error_->UnMap();
-  }
-
+  OUT_OF_RANGE_VALIDATION(kernel_error_);
   return MACE_SUCCESS;
 }
 
 template <typename T>
 MaceStatus WinogradInverseTransformFunctor<DeviceType::GPU, T>::operator()(
-    const Tensor *input_tensor,
-    const Tensor *bias,
+    const std::vector<const Tensor*> &inputs,
     Tensor *output_tensor,
     StatsFuture *future) {
   auto runtime = OpenCLRuntime::Global();
 
+  const Tensor *input_tensor = inputs[0];
+  const Tensor *bias = inputs.size() == 3 ? inputs[2] : nullptr;
+
   if (kernel_.get() == nullptr) {
     std::string obfuscated_kernel_name;
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(kernel_error_);
+    NON_UNIFORM_WG_CONFIG;
     if (wino_blk_size_ == 4) {
       obfuscated_kernel_name =
           MACE_OBFUSCATE_SYMBOL("winograd_inverse_transform_4x4");
@@ -173,21 +158,9 @@ MaceStatus WinogradInverseTransformFunctor<DeviceType::GPU, T>::operator()(
     }
 
     built_options.emplace("-DDATA_TYPE=" +
-                          DtToUpstreamCLDt(DataTypeToEnum<T>::value));
+                          DtToUpCompatibleCLDt(DataTypeToEnum<T>::value));
     built_options.emplace("-DCMD_DATA_TYPE=" +
-                          DtToUpstreamCLCMDDt(DataTypeToEnum<T>::value));
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      kernel_error_ = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR(kernel_error_->Allocate(1));
-      kernel_error_->Map(nullptr);
-      *(kernel_error_->mutable_data<char>()) = 0;
-      kernel_error_->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
+                          DtToUpCompatibleCLCMDDt(DataTypeToEnum<T>::value));
     built_options.emplace(bias != nullptr ? "-DBIAS" : "");
     switch (activation_) {
       case NOOP:
@@ -211,38 +184,39 @@ MaceStatus WinogradInverseTransformFunctor<DeviceType::GPU, T>::operator()(
         LOG(FATAL) << "Unknown activation type: " << activation_;
     }
 
-    kernel_ = runtime->BuildKernel("winograd_transform", obfuscated_kernel_name,
-                                   built_options);
+    MACE_RETURN_IF_ERROR(runtime->BuildKernel("winograd_transform",
+                                              obfuscated_kernel_name,
+                                              built_options,
+                                              &kernel_));
 
     kwg_size_ =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(kernel_));
   }
 
+  Tensor::MappingGuard output_shape_guard(inputs[1]);
+  const int32_t *output_shape_data = inputs[1]->data<int32_t>();
+  const index_t batch = output_shape_data[0];
+  const index_t height = output_shape_data[1];
+  const index_t width = output_shape_data[2];
   const uint32_t gws[2] = {
       static_cast<uint32_t>(input_tensor->dim(2)),
       static_cast<uint32_t>(RoundUpDiv4(input_tensor->dim(1)))};
   if (!IsVecEqual(input_shape_, input_tensor->shape())) {
-    std::vector<index_t> output_shape = {batch_, height_, width_,
+    std::vector<index_t> output_shape = {batch, height, width,
                                          input_tensor->dim(1)};
     std::vector<size_t> image_shape;
     CalImage2DShape(output_shape, BufferType::IN_OUT_CHANNEL, &image_shape);
     MACE_RETURN_IF_ERROR(output_tensor->ResizeImage(output_shape, image_shape));
 
-    const index_t round_h = (height_ + wino_blk_size_ - 1) / wino_blk_size_;
-    const index_t round_w = (width_ + wino_blk_size_ - 1) / wino_blk_size_;
+    const index_t round_h = (height + wino_blk_size_ - 1) / wino_blk_size_;
+    const index_t round_w = (width + wino_blk_size_ - 1) / wino_blk_size_;
 
     const float round_hw_r = 1.f / static_cast<float>(round_h * round_w);
     const float round_w_r = 1.f / static_cast<float>(round_w);
 
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel_.setArg(idx++,
-                     *(static_cast<cl::Buffer *>(kernel_error_->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel_.setArg(idx++, gws[0]);
-      kernel_.setArg(idx++, gws[1]);
-    }
+    OUT_OF_RANGE_SET_ARG;
+    SET_2D_GWS_ARGS(kernel_);
     kernel_.setArg(
         idx++,
         *(static_cast<const cl::Image2D *>(input_tensor->opencl_image())));
@@ -267,14 +241,10 @@ MaceStatus WinogradInverseTransformFunctor<DeviceType::GPU, T>::operator()(
       Concat("winograd_inverse_transform_kernel", output_tensor->dim(0),
              output_tensor->dim(1), output_tensor->dim(2),
              output_tensor->dim(3), input_tensor->dim(2));
-  TuningOrRun2DKernel(kernel_, tuning_key, gws, lws, future);
+  MACE_RETURN_IF_ERROR(TuningOrRun2DKernel(kernel_, tuning_key,
+                                           gws, lws, future));
 
-  if (runtime->IsOutOfRangeCheckEnabled()) {
-    kernel_error_->Map(nullptr);
-    char *kerror_code = kernel_error_->mutable_data<char>();
-    MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-    kernel_error_->UnMap();
-  }
+  OUT_OF_RANGE_VALIDATION(kernel_error_);
   return MACE_SUCCESS;
 }
 

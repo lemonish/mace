@@ -20,6 +20,12 @@ enum DataType {
   DT_INT32 = 4;
 }
 
+enum MemoryType {
+  CPU_BUFFER = 0;
+  GPU_BUFFER = 1;
+  GPU_IMAGE = 2;
+}
+
 message ConstTensor {
   repeated int64 dims = 1;
   optional DataType data_type = 2 [default = DT_FLOAT];
@@ -28,6 +34,8 @@ message ConstTensor {
   optional string name = 5;
   optional int64 offset = 6;
   optional int64 data_size = 7;
+  optional float scale = 8;
+  optional int32 zero_point = 9;
 
   optional uint32 node_id = 100;
 }
@@ -73,8 +81,10 @@ message OperatorDef {
 // for memory optimization
 message MemoryBlock {
   optional int32 mem_id = 1;
-  optional uint32 x = 2;
-  optional uint32 y = 3;
+  optional int32 device_type = 2;
+  optional MemoryType mem_type = 3;
+  optional uint32 x = 4;
+  optional uint32 y = 5;
 }
 message MemoryArena {
   repeated MemoryBlock mem_block = 1;
@@ -96,12 +106,23 @@ message OutputInfo {
   optional DataType data_type = 5 [default = DT_FLOAT];
 }
 
+message QuantizeActivationInfo {
+  optional string tensor_name = 1;
+  optional float scale = 2;
+  optional int32 zero_point = 3;
+}
+
+message QuantizeInfo {
+  repeated QuantizeActivationInfo activation_info = 1;
+}
+
 message NetDef {
   optional string name = 1;
   repeated OperatorDef op = 2;
   optional string version = 3;
   repeated Argument arg = 4;
   repeated ConstTensor tensors = 5;
+  optional QuantizeInfo quantize_info = 6;
 
   // for mem optimization
   optional MemoryArena mem_arena = 10;

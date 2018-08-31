@@ -25,25 +25,30 @@ namespace kernels {
 namespace {
 std::vector<uint32_t> LocalWS(const uint32_t *gws, const uint32_t kwg_size) {
   std::vector<uint32_t> lws(4, 0);
-  uint64_t cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
-  uint32_t base = std::max<uint32_t>(cache_size / kBaseGPUMemCacheSize, 1);
-  lws[1] = std::min<uint32_t>(gws[1], kwg_size);
-  if (lws[1] >= base) {
-    lws[0] = std::min<uint32_t>(gws[0], base);
+  if (kwg_size == 0) {
+    lws[0] = lws[1] = lws[2] = 1;
   } else {
-    lws[0] = gws[0] / 8;
-    if (lws[0] == 0) {
-      lws[0] = gws[0];
+    uint64_t
+        cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
+    uint32_t base = std::max<uint32_t>(cache_size / kBaseGPUMemCacheSize, 1);
+    lws[1] = std::min<uint32_t>(gws[1], kwg_size);
+    if (lws[1] >= base) {
+      lws[0] = std::min<uint32_t>(gws[0], base);
+    } else {
+      lws[0] = gws[0] / 8;
+      if (lws[0] == 0) {
+        lws[0] = gws[0];
+      }
     }
+    lws[0] = std::min<uint32_t>(lws[0], kwg_size / lws[1]);
+    const uint32_t lws_size = lws[0] * lws[1];
+    lws[2] = gws[2] / 8;
+    if (lws[2] == 0) {
+      lws[2] = gws[2];
+    }
+    lws[2] = std::max<uint32_t>(std::min<uint32_t>(lws[2], kwg_size / lws_size),
+                                1);
   }
-  lws[0] = std::min<uint32_t>(lws[0], kwg_size / lws[1]);
-  const uint32_t lws_size = lws[0] * lws[1];
-  lws[2] = gws[2] / 8;
-  if (lws[2] == 0) {
-    lws[2] = gws[2];
-  }
-  lws[2] = std::max<uint32_t>(std::min<uint32_t>(lws[2], kwg_size / lws_size),
-                              1);
   return lws;
 }
 
@@ -69,25 +74,18 @@ MaceStatus ResizeBilinearFunctor<DeviceType::GPU, T>::operator()(
 
   if (kernel_.get() == nullptr) {
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(kernel_error_);
+    NON_UNIFORM_WG_CONFIG;
     std::string kernel_name = MACE_OBFUSCATE_SYMBOL("resize_bilinear_nocache");
     built_options.emplace("-Dresize_bilinear_nocache=" + kernel_name);
     auto dt = DataTypeToEnum<T>::value;
-    built_options.emplace("-DDATA_TYPE=" + DtToUpstreamCLDt(dt));
-    built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpstreamCLCMDDt(dt));
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      kernel_error_ = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR(kernel_error_->Allocate(1));
-      kernel_error_->Map(nullptr);
-      *(kernel_error_->mutable_data<char>()) = 0;
-      kernel_error_->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
-    kernel_ =
-        runtime->BuildKernel("resize_bilinear", kernel_name, built_options);
+    built_options.emplace("-DDATA_TYPE=" + DtToUpCompatibleCLDt(dt));
+    built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpCompatibleCLCMDDt(dt));
+    MACE_RETURN_IF_ERROR(
+        runtime->BuildKernel("resize_bilinear",
+                             kernel_name,
+                             built_options,
+                             &kernel_));
 
     kwg_size_ =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(kernel_));
@@ -107,15 +105,8 @@ MaceStatus ResizeBilinearFunctor<DeviceType::GPU, T>::operator()(
         CalculateResizeScale(in_width, out_width, align_corners_);
 
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel_.setArg(idx++,
-                     *(static_cast<cl::Buffer *>(kernel_error_->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel_.setArg(idx++, gws[0]);
-      kernel_.setArg(idx++, gws[1]);
-      kernel_.setArg(idx++, gws[2]);
-    }
+    OUT_OF_RANGE_SET_ARG;
+    SET_3D_GWS_ARGS(kernel_);
     kernel_.setArg(idx++, *(input->opencl_image()));
     kernel_.setArg(idx++, *(output->opencl_image()));
     kernel_.setArg(idx++, height_scale);
@@ -131,15 +122,10 @@ MaceStatus ResizeBilinearFunctor<DeviceType::GPU, T>::operator()(
   std::string tuning_key =
       Concat("resize_bilinear_opencl_kernel", output->dim(0), output->dim(1),
              output->dim(2), output->dim(3));
-  TuningOrRun3DKernel(kernel_, tuning_key, gws, lws, future);
+  MACE_RETURN_IF_ERROR(TuningOrRun3DKernel(kernel_, tuning_key,
+                                           gws, lws, future));
 
-  if (runtime->IsOutOfRangeCheckEnabled()) {
-    kernel_error_->Map(nullptr);
-    char *kerror_code = kernel_error_->mutable_data<char>();
-    MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-    kernel_error_->UnMap();
-  }
-
+  OUT_OF_RANGE_VALIDATION(kernel_error_);
   return MACE_SUCCESS;
 }
 

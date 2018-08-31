@@ -17,7 +17,7 @@
 namespace mace {
 namespace ops {
 
-void Register_StridedSlice(OperatorRegistry *op_registry) {
+void Register_StridedSlice(OperatorRegistryBase *op_registry) {
   MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("StridedSlice")
                                           .Device(DeviceType::CPU)
                                           .TypeConstraint<float>("T")
@@ -28,6 +28,16 @@ void Register_StridedSlice(OperatorRegistry *op_registry) {
                                           .TypeConstraint<int32_t>("T")
                                           .Build(),
                          StridedSliceOp<DeviceType::CPU, int32_t>);
+  MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("StridedSlice")
+                                          .Device(DeviceType::GPU)
+                                          .TypeConstraint<float>("T")
+                                          .Build(),
+                         StridedSliceOp<DeviceType::GPU, float>);
+  MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("StridedSlice")
+                                          .Device(DeviceType::GPU)
+                                          .TypeConstraint<int32_t>("T")
+                                          .Build(),
+                         StridedSliceOp<DeviceType::GPU, int32_t>);
 }
 
 }  // namespace ops

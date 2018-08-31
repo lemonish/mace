@@ -26,27 +26,33 @@ namespace {
 const uint32_t kernel_cache_size = (4 + 4 + 1) * 4 * 4;
 std::vector<uint32_t> LocalWS(const uint32_t *gws, const uint32_t kwg_size) {
   std::vector<uint32_t> lws(4, 0);
-  uint64_t cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
-  uint32_t base = cache_size / kBaseGPUMemCacheSize;
-  lws[1] = std::min<uint32_t>(gws[1], kwg_size);
-  if (lws[1] >= base) {
-    lws[0] = std::min<uint32_t>(gws[0], base);
+  if (kwg_size == 0) {
+    lws[0] = lws[1] = lws[2] = 1;
   } else {
-    lws[0] = std::min<uint32_t>(gws[0] / 8, kwg_size / lws[1]);
-    if (lws[0] < base) {
-      lws[0] = std::min<uint32_t>(std::max<uint32_t>(gws[0] / 4, base),
-                                  kwg_size / lws[1]);
+    uint64_t
+        cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
+    uint32_t base = cache_size / kBaseGPUMemCacheSize;
+    lws[1] = std::min<uint32_t>(gws[1], kwg_size);
+    if (lws[1] >= base) {
+      lws[0] = std::min<uint32_t>(gws[0], base);
+    } else {
+      lws[0] = std::min<uint32_t>(gws[0] / 8, kwg_size / lws[1]);
+      if (lws[0] < base) {
+        lws[0] = std::min<uint32_t>(std::max<uint32_t>(gws[0] / 4, base),
+                                    kwg_size / lws[1]);
+      }
     }
+    lws[0] =
+        std::max<uint32_t>(std::min<uint32_t>(lws[0], kwg_size / lws[1]), 1);
+    const uint32_t lws_size = lws[0] * lws[1];
+    lws[2] = std::min<uint32_t>((cache_size / kernel_cache_size / lws_size) * 4,
+                                gws[2]);
+    if (lws[2] == 0) {
+      lws[2] = gws[2];
+    }
+    lws[2] = std::max<uint32_t>(std::min<uint32_t>(lws[2], kwg_size / lws_size),
+                                1);
   }
-  lws[0] = std::max<uint32_t>(lws[0], 1);
-  const uint32_t lws_size = lws[0] * lws[1];
-  lws[2] = std::min<uint32_t>((cache_size / kernel_cache_size / lws_size) * 4,
-                              gws[2]);
-  if (lws[2] == 0) {
-    lws[2] = gws[2];
-  }
-  lws[2] = std::max<uint32_t>(std::min<uint32_t>(lws[2], kwg_size / lws_size),
-                              1);
   return lws;
 }
 
@@ -87,6 +93,8 @@ static MaceStatus DepthwiseConv2d(cl::Kernel *kernel,
 
   if (kernel->get() == nullptr) {
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(*kernel_error);
+    NON_UNIFORM_WG_CONFIG;
     std::string kernel_name = MACE_OBFUSCATE_SYMBOL("depthwise_conv2d");
     if (stride == 1 && dilations[0] == 1 && dilations[1] == 1) {
       kernel_name = MACE_OBFUSCATE_SYMBOL("depthwise_conv2d_s1");
@@ -94,20 +102,8 @@ static MaceStatus DepthwiseConv2d(cl::Kernel *kernel,
     } else {
       built_options.emplace("-Ddepthwise_conv2d=" + kernel_name);
     }
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      *kernel_error = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR((*kernel_error)->Allocate(1));
-      (*kernel_error)->Map(nullptr);
-      *((*kernel_error)->mutable_data<char>()) = 0;
-      (*kernel_error)->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
-    built_options.emplace("-DDATA_TYPE=" + DtToUpstreamCLDt(dt));
-    built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpstreamCLCMDDt(dt));
+    built_options.emplace("-DDATA_TYPE=" + DtToUpCompatibleCLDt(dt));
+    built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpCompatibleCLCMDDt(dt));
     built_options.emplace(bias != nullptr ? "-DBIAS" : "");
     built_options.emplace(MakeString("-DSTRIDE=", stride));
     switch (activation) {
@@ -129,8 +125,9 @@ static MaceStatus DepthwiseConv2d(cl::Kernel *kernel,
         LOG(FATAL) << "Unknown activation type: " << activation;
     }
 
-    *kernel =
-        runtime->BuildKernel("depthwise_conv2d", kernel_name, built_options);
+    MACE_RETURN_IF_ERROR(
+        runtime->BuildKernel("depthwise_conv2d", kernel_name,
+                             built_options, kernel));
 
     *kwg_size =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(*kernel));
@@ -147,15 +144,8 @@ static MaceStatus DepthwiseConv2d(cl::Kernel *kernel,
                input_channels);
 
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel->setArg(idx++,
-                     *(static_cast<cl::Buffer *>((*kernel_error)->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel->setArg(idx++, gws[0]);
-      kernel->setArg(idx++, gws[1]);
-      kernel->setArg(idx++, gws[2]);
-    }
+    OUT_OF_RANGE_SET_ARG_PTR;
+    SET_3D_GWS_ARGS_PTR(kernel, gws);
     kernel->setArg(idx++, *(input->opencl_image()));
     kernel->setArg(idx++, *(filter->opencl_image()));
     if (bias != nullptr) {
@@ -183,15 +173,10 @@ static MaceStatus DepthwiseConv2d(cl::Kernel *kernel,
   const std::vector<uint32_t> lws = LocalWS(gws, *kwg_size);
   std::string tuning_key =
       Concat("depthwise_conv2d_ocl_kernel", gws[0], gws[1], gws[2], multiplier);
-  TuningOrRun3DKernel(*kernel, tuning_key, gws, lws, future);
+  MACE_RETURN_IF_ERROR(TuningOrRun3DKernel(*kernel, tuning_key,
+                                           gws, lws, future));
 
-  if (runtime->IsOutOfRangeCheckEnabled()) {
-    (*kernel_error)->Map(nullptr);
-    char *kerror_code = (*kernel_error)->mutable_data<char>();
-    MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-    (*kernel_error)->UnMap();
-  }
-
+  OUT_OF_RANGE_VALIDATION(*kernel_error);
   return MACE_SUCCESS;
 }
 

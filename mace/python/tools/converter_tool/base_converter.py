@@ -33,6 +33,7 @@ class FilterFormat(Enum):
     HWIO = 0
     OIHW = 1
     HWOI = 2
+    OHWI = 3
 
 
 class PaddingMode(Enum):
@@ -80,15 +81,18 @@ MaceSupportedOps = [
     'ChannelShuffle',
     'Concat',
     'Conv2D',
+    'Crop',
     'Deconv2D',
     'DepthToSpace',
     'DepthwiseConv2d',
     'Dequantize',
     'Eltwise',
     'FoldedBatchNorm',
+    'Fill',
     'FullyConnected',
     'Gather',
     'Identity',
+    'InferConv2dShape',
     'LocalResponseNorm',
     'MatMul',
     'Pad',
@@ -96,10 +100,12 @@ MaceSupportedOps = [
     'Proposal',
     'Quantize',
     'ReduceMean',
-    'Requantize',
     'Reshape',
+    'ResizeBicubic',
     'ResizeBilinear',
+    'ScalarMath',
     'Slice',
+    'Split',
     'Shape',
     'Squeeze',
     'Stack',
@@ -145,11 +151,12 @@ class MaceKeyword(object):
     mace_constant_value_str = 'constant_value'
     mace_dims_str = 'dims'
     mace_axis_str = 'axis'
+    mace_num_split_str = 'num_split'
     mace_keepdims_str = 'keepdims'
     mace_shape_str = 'shape'
     mace_winograd_filter_transformed = 'is_filter_transformed'
     mace_device = 'device'
-    mace_value_str = 'value'
+    mace_scalar_input_str = 'scalar_input'
     mace_wino_block_size = 'wino_block_size'
     mace_output_shape_str = 'output_shape'
     mace_begin_mask_str = 'begin_mask'
@@ -160,6 +167,11 @@ class MaceKeyword(object):
     mace_transpose_a_str = 'transpose_a'
     mace_transpose_b_str = 'transpose_b'
     mace_op_data_type_str = 'T'
+    mace_offset_str = 'offset'
+    mace_from_caffe_str = 'from_caffe'
+    mace_opencl_max_image_size = "opencl_max_image_size"
+    mace_seperate_buffer_str = 'seperate_buffer'
+    mace_scalar_input_index_str = 'scalar_input_index'
 
 
 class TransformerRule(Enum):
@@ -185,6 +197,9 @@ class TransformerRule(Enum):
     ADD_IN_OUT_TENSOR_INFO = 20
     ADD_MACE_INPUT_AND_OUTPUT_NODES = 21
     UPDATE_FLOAT_OP_DATA_TYPE = 22
+    QUANTIZE_NODES = 23
+    ADD_QUANTIZE_TENSOR_RANGE = 24
+    QUANTIZE_WEIGHTS = 25
 
 
 class ConverterInterface(object):
@@ -224,40 +239,15 @@ class NodeInfo(object):
 class ConverterOption(object):
     """A class for specifying options passed to converter tool"""
 
-    def __init__(self, transformers=None):
+    def __init__(self):
         self._input_nodes = {}
         self._output_nodes = {}
         self._data_type = mace_pb2.DT_FLOAT
         self._device = DeviceType.CPU.value
         self._winograd = 0
-        if transformers:
-            self._transformer_option = [TransformerRule[transformer]
-                                        for transformer in transformers]
-        else:
-            self._transformer_option = [
-                TransformerRule.REMOVE_IDENTITY_OP,
-                TransformerRule.TRANSFORM_GLOBAL_POOLING,
-                TransformerRule.FOLD_RESHAPE,
-                TransformerRule.TRANSFORM_MATMUL_TO_FC,
-                TransformerRule.FOLD_BATCHNORM,
-                TransformerRule.FOLD_CONV_AND_BN,
-                TransformerRule.FOLD_DEPTHWISE_CONV_AND_BN,
-                TransformerRule.TRANSFORM_GPU_WINOGRAD,
-                TransformerRule.TRANSFORM_ADD_TO_BIASADD,
-                TransformerRule.FOLD_BIASADD,
-                TransformerRule.FLATTEN_ATROUS_CONV,
-                TransformerRule.FOLD_ACTIVATION,
-                TransformerRule.TRANSPOSE_FILTERS,
-                TransformerRule.TRANSPOSE_DATA_FORMAT,
-                TransformerRule.ADD_IN_OUT_TENSOR_INFO,
-                TransformerRule.TRANSFORM_GLOBAL_CONV_TO_FC,
-                TransformerRule.RESHAPE_FC_WEIGHT,
-                TransformerRule.TRANSFORM_BUFFER_IMAGE,
-                TransformerRule.ADD_DEVICE,
-                TransformerRule.UPDATE_FLOAT_OP_DATA_TYPE,
-                TransformerRule.ADD_MACE_INPUT_AND_OUTPUT_NODES,
-                TransformerRule.SORT_BY_EXECUTION,
-            ]
+        self._quantize = False
+        self._quantize_range_file = ""
+        self._transformer_option = None
 
     @property
     def input_nodes(self):
@@ -278,6 +268,14 @@ class ConverterOption(object):
     @property
     def winograd(self):
         return self._winograd
+
+    @property
+    def quantize(self):
+        return self._quantize
+
+    @property
+    def quantize_range_file(self):
+        return self._quantize_range_file
 
     @property
     def transformer_option(self):
@@ -311,6 +309,18 @@ class ConverterOption(object):
     def winograd(self, winograd):
         self._winograd = winograd
 
+    @quantize.setter
+    def quantize(self, quantize):
+        self._quantize = quantize
+
+    @quantize_range_file.setter
+    def quantize_range_file(self, quantize_range_file):
+        self._quantize_range_file = quantize_range_file
+
+    @transformer_option.setter
+    def transformer_option(self, transformer_option):
+        self._transformer_option = transformer_option
+
     def disable_transpose_filters(self):
         if TransformerRule.TRANSPOSE_FILTERS in self._transformer_option:
             self._transformer_option.remove(TransformerRule.TRANSPOSE_FILTERS)
@@ -318,6 +328,49 @@ class ConverterOption(object):
     def enable_transpose_filters(self):
         if TransformerRule.TRANSPOSE_FILTERS not in self._transformer_option:
             self._transformer_option.append(TransformerRule.TRANSPOSE_FILTERS)
+
+    def build(self):
+        if self._transformer_option:
+            self._transformer_option = [TransformerRule[transformer]
+                                        for transformer in self._transformer_option]  # noqa
+        else:
+            self._transformer_option = [
+                # Model structure related transformation
+                TransformerRule.REMOVE_IDENTITY_OP,
+                TransformerRule.TRANSFORM_GLOBAL_POOLING,
+                TransformerRule.FOLD_RESHAPE,
+                TransformerRule.TRANSFORM_MATMUL_TO_FC,
+                TransformerRule.FOLD_BATCHNORM,
+                TransformerRule.FOLD_CONV_AND_BN,
+                TransformerRule.FOLD_DEPTHWISE_CONV_AND_BN,
+                TransformerRule.TRANSFORM_GPU_WINOGRAD,
+                TransformerRule.TRANSFORM_ADD_TO_BIASADD,
+                TransformerRule.FOLD_BIASADD,
+                TransformerRule.FLATTEN_ATROUS_CONV,
+                TransformerRule.FOLD_ACTIVATION,
+                TransformerRule.TRANSFORM_GLOBAL_CONV_TO_FC,
+                TransformerRule.RESHAPE_FC_WEIGHT,
+                # Model data format related transformation
+                TransformerRule.TRANSPOSE_FILTERS,
+                TransformerRule.TRANSPOSE_DATA_FORMAT,
+                # Mace model structure related transformation
+                TransformerRule.ADD_IN_OUT_TENSOR_INFO,
+                # Device related transformation
+                TransformerRule.TRANSFORM_BUFFER_IMAGE,
+                TransformerRule.ADD_DEVICE,
+                # Data type related transformation
+                TransformerRule.UPDATE_FLOAT_OP_DATA_TYPE,
+                # Transform finalization
+                TransformerRule.ADD_MACE_INPUT_AND_OUTPUT_NODES,
+                TransformerRule.SORT_BY_EXECUTION,
+            ]
+            if self._quantize:
+                self._transformer_option = self._transformer_option[:-1] + [
+                    TransformerRule.QUANTIZE_NODES,
+                    TransformerRule.ADD_QUANTIZE_TENSOR_RANGE,
+                    TransformerRule.QUANTIZE_WEIGHTS,
+                    TransformerRule.SORT_BY_EXECUTION,
+                ]
 
 
 class ConverterUtil(object):
@@ -333,6 +386,12 @@ class ConverterUtil(object):
         data_format_arg = op.arg.add()
         data_format_arg.name = MaceKeyword.mace_data_format_str
         data_format_arg.i = data_format.value
+
+    @staticmethod
+    def add_data_type_arg(op, data_type):
+        data_type_arg = op.arg.add()
+        data_type_arg.name = MaceKeyword.mace_op_data_type_str
+        data_type_arg.i = data_type
 
     @staticmethod
     def data_format(op):

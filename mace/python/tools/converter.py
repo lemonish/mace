@@ -19,12 +19,9 @@ import os.path
 import copy
 
 from mace.proto import mace_pb2
-from mace.python.tools import tf_dsp_converter_lib
 from mace.python.tools import memory_optimizer
 from mace.python.tools import model_saver
 from mace.python.tools.converter_tool import base_converter as cvt
-from mace.python.tools.converter_tool import tensorflow_converter
-from mace.python.tools.converter_tool import caffe_converter
 from mace.python.tools.converter_tool import transformer
 from mace.python.tools.convert_util import mace_check
 
@@ -99,41 +96,46 @@ def main(unused_args):
         print ("runtime %s is not supported." % FLAGS.runtime)
         sys.exit(-1)
 
+    option = cvt.ConverterOption()
+    if FLAGS.graph_optimize_options:
+        option.transformer_option = FLAGS.graph_optimize_options.split(',')
+    option.winograd = FLAGS.winograd
+    option.quantize = FLAGS.quantize
+    option.quantize_range_file = FLAGS.quantize_range_file
+
+    input_node_names = FLAGS.input_node.split(',')
+    input_node_shapes = FLAGS.input_shape.split(':')
+    if len(input_node_names) != len(input_node_shapes):
+        raise Exception('input node count and shape count do not match.')
+    for i in xrange(len(input_node_names)):
+        input_node = cvt.NodeInfo()
+        input_node.name = input_node_names[i]
+        input_node.shape = parse_int_array_from_str(input_node_shapes[i])
+        option.add_input_node(input_node)
+
+    output_node_names = FLAGS.output_node.split(',')
+    for i in xrange(len(output_node_names)):
+        output_node = cvt.NodeInfo()
+        output_node.name = output_node_names[i]
+        option.add_output_node(output_node)
+
+    option.build()
+
+    print("Transform model to one that can better run on device")
     if FLAGS.runtime == 'dsp':
-        if FLAGS.platform == 'tensorflow':
-            output_graph_def = tf_dsp_converter_lib.convert_to_mace_pb(
-                FLAGS.model_file, FLAGS.input_node, FLAGS.output_node,
-                FLAGS.dsp_mode)
-        else:
-            print("%s does not support dsp runtime yet." % FLAGS.platform)
-            sys.exit(-1)
+        mace_check(FLAGS.platform == 'tensorflow',
+                   'DSP only supports tensorflow')
+        from mace.python.tools.converter_tool import tf_dsp_converter
+        converter = tf_dsp_converter.TensorflowDspConverter(
+            option, FLAGS.model_file)
+        output_graph_def = converter.run()
     else:
-        if FLAGS.transformers:
-            option = cvt.ConverterOption(FLAGS.transformers.split(','))
-        else:
-            option = cvt.ConverterOption()
-        option.winograd = FLAGS.winograd
-
-        input_node_names = FLAGS.input_node.split(',')
-        input_node_shapes = FLAGS.input_shape.split(':')
-        if len(input_node_names) != len(input_node_shapes):
-            raise Exception('input node count and shape count do not match.')
-        for i in xrange(len(input_node_names)):
-            input_node = cvt.NodeInfo()
-            input_node.name = input_node_names[i]
-            input_node.shape = parse_int_array_from_str(input_node_shapes[i])
-            option.add_input_node(input_node)
-
-        output_node_names = FLAGS.output_node.split(',')
-        for i in xrange(len(output_node_names)):
-            output_node = cvt.NodeInfo()
-            output_node.name = output_node_names[i]
-            option.add_output_node(output_node)
-
         if FLAGS.platform == 'tensorflow':
+            from mace.python.tools.converter_tool import tensorflow_converter
             converter = tensorflow_converter.TensorflowConverter(
                 option, FLAGS.model_file)
         elif FLAGS.platform == 'caffe':
+            from mace.python.tools.converter_tool import caffe_converter
             converter = caffe_converter.CaffeConverter(option,
                                                        FLAGS.model_file,
                                                        FLAGS.weight_file)
@@ -143,7 +145,6 @@ def main(unused_args):
 
         output_graph_def = converter.run()
 
-        print("Transform model to one that can better run on device")
         if FLAGS.runtime == 'cpu+gpu':
             cpu_graph_def = copy.deepcopy(output_graph_def)
 
@@ -172,6 +173,13 @@ def main(unused_args):
             output_graph_def.op.extend(cpu_graph_def.op)
             output_graph_def.mem_arena.mem_block.extend(
                 cpu_graph_def.mem_arena.mem_block)
+            output_graph_arg_names = set()
+            for arg in output_graph_def.arg:
+                output_graph_arg_names.add(arg.name)
+
+            for arg in cpu_graph_def.arg:
+                if arg.name not in output_graph_arg_names:
+                    output_graph_def.arg.extend(arg)
             print "Merge done"
         else:
             option.device = device_type_map[FLAGS.runtime]
@@ -197,7 +205,7 @@ def main(unused_args):
         FLAGS.output_dir, FLAGS.runtime,
         FLAGS.embed_model_data,
         FLAGS.winograd, FLAGS.data_type,
-        FLAGS.model_build_type)
+        FLAGS.model_graph_format)
 
 
 def str2bool(v):
@@ -276,10 +284,10 @@ def parse_args():
         default=True,
         help="embed model data.")
     parser.add_argument(
-        "--model_build_type",
+        "--model_graph_format",
         type=str,
-        default="code",
-        help="[proto|code] build models to code" +
+        default="file",
+        help="[file|code] build models to code" +
                 "or `Protobuf` file.")
     parser.add_argument(
         "--data_type",
@@ -287,10 +295,22 @@ def parse_args():
         default="fp16_fp32",
         help="fp16_fp32/fp32_fp32")
     parser.add_argument(
-        "--transformers",
+        "--graph_optimize_options",
         type=str,
         default="",
-        help="model transformers")
+        help="graph optimize options")
+    parser.add_argument(
+        "--quantize",
+        type=str2bool,
+        nargs='?',
+        const=False,
+        default=False,
+        help="quantize model")
+    parser.add_argument(
+        "--quantize_range_file",
+        type=str,
+        default="",
+        help="file path of quantize range for each tensor")
     return parser.parse_known_args()
 
 

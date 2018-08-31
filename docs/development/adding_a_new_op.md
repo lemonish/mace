@@ -58,7 +58,7 @@ Define the Ops registering function in `mace/ops/my_custom_op.cc`.
 namespace mace {
 namespace ops {
 
-void Register_My_Custom_Op(OperatorRegistry *op_registry) {
+void Register_My_Custom_Op(OperatorRegistryBase *op_registry) {
   REGISTER_OPERATOR(op_registry, OpKeyBuilder("my_custom_op")
                                      .Device(DeviceType::CPU)
                                      .TypeConstraint<float>("T")
@@ -82,7 +82,37 @@ void Register_My_Custom_Op(OperatorRegistry *op_registry) {
 }  // namespace mace
 
 ```
-And then register the new Op in `mace/core/operator.cc`.
+And then register the new Op in `mace/ops/ops_register.cc`.
+```
+#include "mace/ops/ops_register.h"
+
+namespace mace {
+
+namespace ops {
+// Keep in lexicographical order
+
+...
+
+extern void Register_My_Custom_Op(OperatorRegistryBase *op_registry);
+
+...
+
+}  // namespace ops
+
+
+OperatorRegistry::OperatorRegistry() : OperatorRegistryBase() {
+  // Keep in lexicographical order
+
+  ...
+
+  ops::Register_My_Custom_Op(this);
+
+  ...
+
+}
+
+}  // namespace mace
+```
 
 Implement the Op kernel code
 ----------------------------
@@ -95,6 +125,10 @@ Add test and benchmark
 ----------------------
 It's strongly recommended to add unit tests and micro benchmarks for your
 new Op. If you wish to contribute back, it's required.
+
+Add Op in model converter
+-------------------------
+You need to add this new Op in the model converter.
 
 Document the new Op
 ---------------------

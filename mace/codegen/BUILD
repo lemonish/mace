@@ -5,26 +5,36 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
+load("//mace:mace.bzl", "mace_version_genrule", "encrypt_opencl_kernel_genrule")
+
 cc_library(
-    name = "generated_models",
+    name = "libmodels",
     srcs = glob(["models/*/*.cc"]),
     hdrs = glob(["models/*/*.h"]),
     copts = ["-Werror", "-Wextra", "-Wno-missing-field-initializers"],
     deps = [
         "//mace/core",
-        "//mace/ops",
     ],
 )
 
-cc_library(
-    name = "generated_opencl",
-    srcs = glob(["opencl/*.cc"]),
-    copts = ["-Werror", "-Wextra", "-Wno-missing-field-initializers"],
+genrule(
+    name = "generated_models",
+    srcs = [
+        ":libmodels",
+    ],
+    outs = ["libgenerated_models.a"],
+    cmd = "binary=`echo $(locations :libmodels) | xargs -n 1 | grep libmodels.a`;" +
+          "$(STRIP) -x $$binary -o $@",
+    visibility = ["//visibility:public"],
 )
 
+mace_version_genrule()
+
+encrypt_opencl_kernel_genrule()
+
 cc_library(
-    name = "generated_tuning_params",
-    srcs = ["tuning/tuning_params.cc"],
+    name = "generated_opencl",
+    srcs = ["opencl/encrypt_opencl_kernel.cc"],
     copts = ["-Werror", "-Wextra", "-Wno-missing-field-initializers"],
 )
 
@@ -36,9 +46,16 @@ cc_library(
 
 cc_library(
     name = "generated_mace_engine_factory",
-    hdrs = ["engine/mace_engine_factory.h"],
+    hdrs = glob(["engine/*.h"]),
     copts = ["-Werror", "-Wextra", "-Wno-missing-field-initializers"],
     deps = [
         "//mace/public",
     ],
+)
+
+cc_library(
+  name = "generated_libmace",
+  srcs = glob(["lib/*"]),
+  linkstatic = 1,
+  visibility = ["//visibility:public"],
 )

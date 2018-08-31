@@ -24,12 +24,18 @@ namespace kernels {
 namespace {
 std::vector<uint32_t> LocalWS(const uint32_t *gws, const uint32_t kwg_size) {
   std::vector<uint32_t> lws(4, 0);
-  uint64_t cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
-  uint32_t base = std::max<uint32_t>(cache_size / kBaseGPUMemCacheSize, 1);
-  lws[1] = std::min<uint32_t>(gws[1], kwg_size);
-  lws[0] = std::min<uint32_t>(base, kwg_size / lws[1]);
-  const uint32_t lws_size = lws[0] * lws[1];
-  lws[2] = std::max<uint32_t>(std::min<uint32_t>(base, kwg_size / lws_size), 1);
+  if (kwg_size == 0) {
+    lws[0] = lws[1] = lws[2] = 1;
+  } else {
+    uint64_t
+        cache_size = OpenCLRuntime::Global()->device_global_mem_cache_size();
+    uint32_t base = std::max<uint32_t>(cache_size / kBaseGPUMemCacheSize, 1);
+    lws[1] = std::min<uint32_t>(gws[1], kwg_size);
+    lws[0] = std::min<uint32_t>(base, kwg_size / lws[1]);
+    const uint32_t lws_size = lws[0] * lws[1];
+    lws[2] =
+        std::max<uint32_t>(std::min<uint32_t>(base, kwg_size / lws_size), 1);
+  }
   return lws;
 }
 
@@ -59,46 +65,30 @@ static MaceStatus Concat2(cl::Kernel *kernel,
 
   if (kernel->get() == nullptr) {
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(*kernel_error);
+    NON_UNIFORM_WG_CONFIG;
     std::string kernel_name = MACE_OBFUSCATE_SYMBOL("concat_channel");
     built_options.emplace("-Dconcat_channel=" + kernel_name);
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      *kernel_error = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR((*kernel_error)->Allocate(1));
-      (*kernel_error)->Map(nullptr);
-      *((*kernel_error)->mutable_data<char>()) = 0;
-      (*kernel_error)->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
     if (input0->dtype() == output->dtype()) {
       built_options.emplace("-DDATA_TYPE=" + DtToCLDt(dt));
       built_options.emplace("-DCMD_DATA_TYPE=" + DtToCLCMDDt(dt));
     } else {
-      built_options.emplace("-DDATA_TYPE=" + DtToUpstreamCLDt(dt));
-      built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpstreamCLCMDDt(dt));
+      built_options.emplace("-DDATA_TYPE=" + DtToUpCompatibleCLDt(dt));
+      built_options.emplace("-DCMD_DATA_TYPE=" + DtToUpCompatibleCLCMDDt(dt));
     }
     if (input0->dim(3) % 4 == 0) {
       built_options.emplace("-DDIVISIBLE_FOUR");
     }
-    *kernel = runtime->BuildKernel("concat", kernel_name, built_options);
+    MACE_RETURN_IF_ERROR(runtime->BuildKernel("concat", kernel_name,
+                                              built_options, kernel));
 
     *kwg_size =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(*kernel));
   }
   if (!IsVecEqual(*prev_input_shape, input0->shape())) {
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel->setArg(idx++,
-                     *(static_cast<cl::Buffer *>((*kernel_error)->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel->setArg(idx++, gws[0]);
-      kernel->setArg(idx++, gws[1]);
-      kernel->setArg(idx++, gws[2]);
-    }
+    OUT_OF_RANGE_SET_ARG_PTR;
+    SET_3D_GWS_ARGS_PTR(kernel, gws);
     kernel->setArg(idx++,
                    *(static_cast<const cl::Image2D *>(input0->opencl_image())));
     kernel->setArg(idx++,
@@ -114,15 +104,9 @@ static MaceStatus Concat2(cl::Kernel *kernel,
   std::string tuning_key =
       Concat("concat_opencl_kernel", output->dim(0), output->dim(1),
              output->dim(2), output->dim(3));
-  TuningOrRun3DKernel(*kernel, tuning_key, gws, lws, future);
-
-  if (runtime->IsOutOfRangeCheckEnabled()) {
-    (*kernel_error)->Map(nullptr);
-    char *kerror_code = (*kernel_error)->mutable_data<char>();
-    MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-    (*kernel_error)->UnMap();
-  }
-
+  MACE_RETURN_IF_ERROR(TuningOrRun3DKernel(*kernel, tuning_key,
+                                           gws, lws, future));
+  OUT_OF_RANGE_VALIDATION(*kernel_error);
   return MACE_SUCCESS;
 }
 
@@ -141,23 +125,14 @@ static MaceStatus ConcatN(cl::Kernel *kernel,
 
   if (kernel->get() == nullptr) {
     std::set<std::string> built_options;
+    OUT_OF_RANGE_CONFIG(*kernel_error);
+    NON_UNIFORM_WG_CONFIG;
     std::string kernel_name = MACE_OBFUSCATE_SYMBOL("concat_channel_multi");
     built_options.emplace("-Dconcat_channel_multi=" + kernel_name);
     built_options.emplace("-DDATA_TYPE=" + DtToCLDt(dt));
     built_options.emplace("-DCMD_DATA_TYPE=" + DtToCLCMDDt(dt));
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      built_options.emplace("-DOUT_OF_RANGE_CHECK");
-      *kernel_error = std::move(std::unique_ptr<Buffer>(
-          new Buffer(GetDeviceAllocator(DeviceType::GPU))));
-      MACE_RETURN_IF_ERROR((*kernel_error)->Allocate(1));
-      (*kernel_error)->Map(nullptr);
-      *((*kernel_error)->mutable_data<char>()) = 0;
-      (*kernel_error)->UnMap();
-    }
-    if (runtime->IsNonUniformWorkgroupsSupported()) {
-      built_options.emplace("-DNON_UNIFORM_WORK_GROUP");
-    }
-    *kernel = runtime->BuildKernel("concat", kernel_name, built_options);
+    MACE_RETURN_IF_ERROR(runtime->BuildKernel("concat", kernel_name,
+                                              built_options, kernel));
     *kwg_size =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(*kernel));
   }
@@ -176,15 +151,8 @@ static MaceStatus ConcatN(cl::Kernel *kernel,
     const std::vector<uint32_t> lws = LocalWS(gws, *kwg_size);
 
     uint32_t idx = 0;
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      kernel->setArg(idx++,
-                     *(static_cast<cl::Buffer *>((*kernel_error)->buffer())));
-    }
-    if (!runtime->IsNonUniformWorkgroupsSupported()) {
-      kernel->setArg(idx++, gws[0]);
-      kernel->setArg(idx++, gws[1]);
-      kernel->setArg(idx++, gws[2]);
-    }
+    OUT_OF_RANGE_SET_ARG_PTR;
+    SET_3D_GWS_ARGS_PTR(kernel, gws);
     kernel->setArg(idx++, *(input->opencl_image()));
     kernel->setArg(idx++, static_cast<int32_t>(chan_blk_offset));
     kernel->setArg(idx++, *(output->opencl_image()));
@@ -207,13 +175,8 @@ static MaceStatus ConcatN(cl::Kernel *kernel,
           cl::NDRange(roundup_gws[0], roundup_gws[1], roundup_gws[2]),
           cl::NDRange(lws[0], lws[1], lws[2]), nullptr, &event);
     }
-    MACE_CHECK_CL_SUCCESS(error);
-    if (runtime->IsOutOfRangeCheckEnabled()) {
-      (*kernel_error)->Map(nullptr);
-      char *kerror_code = (*kernel_error)->mutable_data<char>();
-      MACE_CHECK(*kerror_code == 0) << "Kernel error code: " << *kerror_code;
-      (*kernel_error)->UnMap();
-    }
+    MACE_CL_RET_STATUS(error);
+    OUT_OF_RANGE_VALIDATION(*kernel_error);
     if (future != nullptr && runtime->is_profiling_enabled()) {
       event.wait();
       CallStats tmp_stats;

@@ -15,6 +15,7 @@
 #ifndef MACE_CORE_REGISTRY_H_
 #define MACE_CORE_REGISTRY_H_
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>  // NOLINT(build/c++11)
@@ -78,7 +79,6 @@ class Registerer {
 #endif
 
 #define MACE_DECLARE_TYPED_REGISTRY(RegistryName, SrcType, ObjectType, ...) \
-  Registry<SrcType, ObjectType, ##__VA_ARGS__> *RegistryName();             \
   typedef Registerer<SrcType, ObjectType, ##__VA_ARGS__>                    \
       Registerer##RegistryName;
 

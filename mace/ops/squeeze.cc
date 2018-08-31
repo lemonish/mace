@@ -17,12 +17,17 @@
 namespace mace {
 namespace ops {
 
-void Register_Squeeze(OperatorRegistry *op_registry) {
+void Register_Squeeze(OperatorRegistryBase *op_registry) {
   MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("Squeeze")
                                           .Device(DeviceType::CPU)
                                           .TypeConstraint<float>("T")
                                           .Build(),
                          SqueezeOp<DeviceType::CPU, float>);
+  MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("Squeeze")
+                                          .Device(DeviceType::CPU)
+                                          .TypeConstraint<uint8_t>("T")
+                                          .Build(),
+                         SqueezeOp<DeviceType::CPU, uint8_t>);
 
 #ifdef MACE_ENABLE_OPENCL
   MACE_REGISTER_OPERATOR(op_registry, OpKeyBuilder("Squeeze")
